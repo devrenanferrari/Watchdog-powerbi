@@ -103,11 +103,13 @@ class MetricsSourceConfig(Base):
     def _need_identifiers(self) -> "MetricsSourceConfig":
         if self.kind == "fake":
             return self
-        if self.kind == "metrics_app_rest" and not (self.workspace_id and self.dataset_id):
+        if self.kind == "metrics_app_rest" and not self.dataset_id:
             raise ValueError(
-                "metrics_source.kind='metrics_app_rest' exige 'workspace_id' e 'dataset_id' "
-                "(GUIDs do workspace/dataset do Capacity Metrics App). "
-                "Rode `pbi-watchdog discover --metrics` para descobri-los."
+                "metrics_source.kind='metrics_app_rest' exige 'dataset_id' (GUID do dataset "
+                "do Capacity Metrics App). 'workspace_id' é opcional: omita-o quando o app "
+                "estiver instalado no 'Meu workspace' (URL com /groups/me/apps/...), que é "
+                "como o AppSource o instala. "
+                "Rode `pbi-watchdog discover --metrics` para descobrir os GUIDs."
             )
         if self.kind == "metrics_app_sempy" and not (self.workspace_name and self.dataset_name):
             raise ValueError(

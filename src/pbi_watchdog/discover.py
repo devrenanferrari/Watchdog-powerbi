@@ -44,6 +44,13 @@ class MetricsCandidate:
     dataset_id: str
     dataset_name: str
     score: int = 0
+    #: Onde o candidato foi achado: "workspace", "app" ou "my_workspace".
+    origin: str = "workspace"
+
+    @property
+    def in_my_workspace(self) -> bool:
+        """Conteúdo de app instalado vive no 'Meu workspace' e não tem groupId citável."""
+        return not self.workspace_id
 
     def as_config(self, *, kind: str = "metrics_app_rest") -> Dict[str, Any]:
         """Devolve o bloco `metrics_source` pronto para colar na config."""
@@ -54,19 +61,25 @@ class MetricsCandidate:
                 "dataset_name": self.dataset_name,
                 "profile": "auto",
             }
-        return {
-            "kind": "metrics_app_rest",
-            "workspace_id": self.workspace_id,
-            "dataset_id": self.dataset_id,
-            "profile": "auto",
-        }
+        cfg: Dict[str, Any] = {"kind": "metrics_app_rest", "dataset_id": self.dataset_id}
+        if self.workspace_id:
+            cfg["workspace_id"] = self.workspace_id
+        cfg["profile"] = "auto"
+        return cfg
 
     def __str__(self) -> str:
-        return (
-            f"{self.workspace_name} / {self.dataset_name}\n"
-            f"    workspace_id: {self.workspace_id}\n"
-            f"    dataset_id:   {self.dataset_id}"
-        )
+        onde = {
+            "app": "app instalado (Meu workspace)",
+            "my_workspace": "Meu workspace",
+            "workspace": "workspace",
+        }.get(self.origin, self.origin)
+        linhas = [f"{self.workspace_name} / {self.dataset_name}   [{onde}]"]
+        if self.workspace_id:
+            linhas.append(f"    workspace_id: {self.workspace_id}")
+        else:
+            linhas.append("    workspace_id: (omitir — conteúdo no Meu workspace)")
+        linhas.append(f"    dataset_id:   {self.dataset_id}")
+        return "\n".join(linhas)
 
 
 def _score(workspace_name: str, dataset_name: str) -> int:
@@ -188,11 +201,92 @@ def list_capacities_sempy() -> List[Dict[str, str]]:
 # --------------------------------------------------------------------------- REST
 
 
-def find_metrics_app_rest(
+def find_in_apps_rest(client: RestClient, *, include_all: bool = False) -> List[MetricsCandidate]:
+    """Procura entre os **apps instalados** do usuário.
+
+    É o caminho que importa na prática: o Capacity Metrics App vem do AppSource, e o
+    AppSource instala o conteúdo no 'Meu workspace' de quem instalou. Nenhuma busca por
+    workspaces encontra isso — a URL do relatório mostra `/groups/me/apps/<app-id>/`.
+
+    Os datasets são deduzidos dos relatórios do app, que carregam `datasetId`.
+    """
+    try:
+        apps = client.get(f"{PBI_BASE}/apps")
+    except ApiError as e:
+        log.debug("Não consegui listar apps: HTTP %s", e.status)
+        return []
+
+    out: List[MetricsCandidate] = []
+    for app in apps.get("value", []):
+        app_name = str(app.get("name", ""))
+        if not include_all and not _HINTS.search(app_name):
+            continue
+        app_id = app.get("id")
+        if not app_id:
+            continue
+        try:
+            reports = client.get(f"{PBI_BASE}/apps/{app_id}/reports")
+        except ApiError as e:
+            log.debug("Sem acesso aos relatórios do app %s: HTTP %s", app_name, e.status)
+            continue
+
+        vistos = set()
+        for r in reports.get("value", []):
+            ds_id = r.get("datasetId")
+            if not ds_id or ds_id in vistos:
+                continue
+            vistos.add(ds_id)
+            out.append(
+                MetricsCandidate(
+                    workspace_id="",  # Meu workspace: a rota do executeQueries dispensa o grupo
+                    workspace_name=app_name,
+                    dataset_id=str(ds_id),
+                    dataset_name=str(r.get("name", app_name)),
+                    score=_score(app_name, str(r.get("name", ""))) + 3,  # app é um sinal forte
+                    origin="app",
+                )
+            )
+    return out
+
+
+def find_in_my_workspace_rest(
+    client: RestClient, *, include_all: bool = False
+) -> List[MetricsCandidate]:
+    """Datasets soltos no 'Meu workspace' — cobre quem publicou o modelo manualmente."""
+    try:
+        datasets = client.get(f"{PBI_BASE}/datasets")
+    except ApiError as e:
+        log.debug("Não consegui listar datasets do Meu workspace: HTTP %s", e.status)
+        return []
+
+    out = []
+    for d in datasets.get("value", []):
+        name = str(d.get("name", ""))
+        if not include_all and not _HINTS.search(name):
+            continue
+        out.append(
+            MetricsCandidate(
+                workspace_id="",
+                workspace_name="Meu workspace",
+                dataset_id=str(d.get("id", "")),
+                dataset_name=name,
+                score=_score("", name),
+                origin="my_workspace",
+            )
+        )
+    return out
+
+
+def find_in_workspaces_rest(
     client: RestClient, *, include_all: bool = False, max_workspaces: int = 200
 ) -> List[MetricsCandidate]:
-    """Mesma busca via REST, para quem roda fora do Fabric."""
-    groups = client.get(f"{PBI_BASE}/groups", params={"$top": max_workspaces})
+    """Procura nos workspaces em que o principal é membro."""
+    try:
+        groups = client.get(f"{PBI_BASE}/groups", params={"$top": max_workspaces})
+    except ApiError as e:
+        log.debug("Não consegui listar workspaces: HTTP %s", e.status)
+        return []
+
     out: List[MetricsCandidate] = []
     for g in groups.get("value", []):
         name = g.get("name", "")
@@ -211,9 +305,34 @@ def find_metrics_app_rest(
                     dataset_id=str(d.get("id", "")),
                     dataset_name=str(d.get("name", "")),
                     score=_score(name, str(d.get("name", ""))),
+                    origin="workspace",
                 )
             )
-    return _pick(out)
+    return out
+
+
+def find_metrics_app_rest(
+    client: RestClient, *, include_all: bool = False, max_workspaces: int = 200
+) -> List[MetricsCandidate]:
+    """Busca completa via REST: apps instalados, Meu workspace e workspaces.
+
+    A ordem importa pouco porque o resultado é ranqueado, mas os três lugares precisam ser
+    varridos: o Metrics App pode estar em qualquer um deles dependendo de como foi instalado.
+    """
+    out: List[MetricsCandidate] = []
+    out += find_in_apps_rest(client, include_all=include_all)
+    out += find_in_my_workspace_rest(client, include_all=include_all)
+    out += find_in_workspaces_rest(
+        client, include_all=include_all, max_workspaces=max_workspaces
+    )
+
+    # Um mesmo dataset pode aparecer via app e via workspace; fica o de maior score.
+    melhor: Dict[str, MetricsCandidate] = {}
+    for c in out:
+        atual = melhor.get(c.dataset_id)
+        if atual is None or c.score > atual.score:
+            melhor[c.dataset_id] = c
+    return _pick(list(melhor.values()))
 
 
 # --------------------------------------------------------------------------- render
@@ -224,8 +343,11 @@ def render(candidates: Sequence[MetricsCandidate], *, kind: str = "metrics_app_r
         return (
             "Nenhum candidato a Capacity Metrics App encontrado.\n"
             "  1. Confirme que o app está instalado (AppSource > Microsoft Fabric Capacity Metrics).\n"
-            "  2. Confirme que a identidade que executa enxerga o workspace dele.\n"
-            "  3. Se o workspace foi renomeado, repita com include_all=True."
+            "  2. Se a URL do relatório tem /groups/me/apps/, o conteúdo está no Meu workspace:\n"
+            "     use a busca REST (find_metrics_app_rest), que varre apps instalados —\n"
+            "     a busca por sempy enxerga só workspaces.\n"
+            "  3. Confirme que a identidade que executa enxerga o app/workspace.\n"
+            "  4. Se foi renomeado para algo sem 'metric'/'capacity', repita com include_all=True."
         )
     lines = [f"{len(candidates)} candidato(s), do mais provável ao menos:", ""]
     for i, c in enumerate(candidates, 1):

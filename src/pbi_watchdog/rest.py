@@ -92,15 +92,23 @@ class RestClient:
     # ------------------------------------------------------------------ DAX
 
     def execute_dax(
-        self, workspace_id: str, dataset_id: str, dax: str, *, timeout: int = 120
+        self, workspace_id: Optional[str], dataset_id: str, dax: str, *, timeout: int = 120
     ) -> list:
         """Executa DAX via `executeQueries`. É o que torna a leitura do Metrics App portátil —
         sem XMLA, sem ADOMD, sem Windows.
 
+        `workspace_id` vazio ou None usa a rota sem grupo. Isso não é um detalhe: o Capacity
+        Metrics App é distribuído pelo AppSource e instala seu conteúdo no *Meu workspace*
+        de quem instalou, onde não existe um groupId para citar. A URL do relatório denuncia
+        o caso — `app.powerbi.com/groups/me/apps/...`.
+
         Requer no tenant: "Dataset Execute Queries REST API" habilitado, e o principal
-        com permissão de leitura no workspace do Metrics App.
+        com permissão de leitura sobre o dataset.
         """
-        url = f"{PBI_BASE}/groups/{workspace_id}/datasets/{dataset_id}/executeQueries"
+        if workspace_id:
+            url = f"{PBI_BASE}/groups/{workspace_id}/datasets/{dataset_id}/executeQueries"
+        else:
+            url = f"{PBI_BASE}/datasets/{dataset_id}/executeQueries"
         payload = {
             "queries": [{"query": dax}],
             "serializerSettings": {"includeNulls": True},

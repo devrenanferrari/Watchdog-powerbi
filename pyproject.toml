@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pbi-watchdog"
-version = "0.1.1"
+version = "0.1.2"
 description = "Watchdog de capacidade para Power BI / Microsoft Fabric — detecta consumo anômalo de CU por item e reage em degraus."
 readme = "README.md"
 requires-python = ">=3.9"
