@@ -1,0 +1,81 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pbi-watchdog"
+version = "0.1.0"
+description = "Watchdog de capacidade para Power BI / Microsoft Fabric — detecta consumo anômalo de CU por item e reage em degraus."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["powerbi", "fabric", "capacity", "monitoring", "finops", "observability"]
+authors = [{ name = "Renan Ferrari" }]
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Information Technology",
+    "Topic :: System :: Monitoring",
+    "Topic :: Office/Business :: Financial",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Natural Language :: Portuguese (Brazilian)",
+]
+
+dependencies = [
+    "requests>=2.28",
+    "PyYAML>=6.0",
+    "pydantic>=2.0",
+    "msal>=1.24",
+]
+
+[project.urls]
+Homepage = "https://github.com/devrenanferrari/Watchdog-powerbi"
+Repository = "https://github.com/devrenanferrari/Watchdog-powerbi"
+Issues = "https://github.com/devrenanferrari/Watchdog-powerbi/issues"
+
+[project.optional-dependencies]
+# Rodar dentro de um notebook Fabric: fonte via sempy e a ação kill_xmla_sessions.
+# Instale dentro do runtime Fabric, que já traz o sempy — fora dele o pacote não resolve.
+fabric = ["semantic-link-sempy>=0.4"]
+# Managed Identity, para rodar em Azure Function / Container Apps / VM.
+azure = ["azure-identity>=1.15"]
+dev = ["pytest>=7.4", "pytest-cov>=4.1", "ruff>=0.4", "build>=1.0", "twine>=5.0"]
+
+[project.scripts]
+pbi-watchdog = "pbi_watchdog.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pbi_watchdog"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "C4", "SIM", "RUF"]
+
+# As mensagens ao usuário são em português e usam travessão e reticências de propósito;
+# RUF001/002/003 não devem tratá-los como caractere ambíguo suspeito.
+allowed-confusables = ["–", "—", "…"]
+
+# UP (pyupgrade) fica fora de propósito: o alvo é Python 3.9 e o pydantic resolve as
+# anotações em runtime, então `list[str]` / `X | None` em config.py quebrariam a validação
+# mesmo com `from __future__ import annotations`. Manter Optional/Union/List é intencional.
+#
+# DTZ também fica fora: os timestamps da lib são naive por decisão de projeto — a conversão
+# de fuso acontece uma vez em clock.py e o resto do código compara datetimes ingênuos. Ver
+# a docstring de clock.py.
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]

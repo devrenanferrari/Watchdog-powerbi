@@ -1,0 +1,51 @@
+# CronJob de referência. O ponto crítico é o volume persistente: sem ele, cada execução
+# começa sem baseline e o watchdog nunca sai da fase de observação.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pbi-watchdog
+spec:
+  schedule: "*/15 * * * *"          # precisa bater com defaults.interval_minutes
+  concurrencyPolicy: Forbid         # dois ciclos concorrentes dividem o intervalo derivado
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1               # um ciclo perdido é irrelevante; o próximo vem em 15 min
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: watchdog
+              image: your-registry/pbi-watchdog:0.1.0
+              args: ["run"]
+              env:
+                - name: PBI_CLIENT_ID
+                  valueFrom:
+                    secretKeyRef: { name: pbi-watchdog, key: client-id }
+                - name: PBI_CLIENT_SECRET
+                  valueFrom:
+                    secretKeyRef: { name: pbi-watchdog, key: client-secret }
+                - name: TEAMS_WEBHOOK_URL
+                  valueFrom:
+                    secretKeyRef: { name: pbi-watchdog, key: teams-webhook }
+              volumeMounts:
+                - name: state
+                  mountPath: /data
+              resources:
+                requests: { cpu: 100m, memory: 128Mi }
+                limits:   { cpu: 500m, memory: 512Mi }
+          volumes:
+            - name: state
+              persistentVolumeClaim:
+                claimName: pbi-watchdog-state
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pbi-watchdog-state
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi

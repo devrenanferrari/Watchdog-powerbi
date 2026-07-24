@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Config real e estado — nunca versionar: a config aponta segredos por ${VAR},
+# mas o .db contém o inventário de itens e consumo da organização.
+watchdog.yaml
+*.db
+*.db-wal
+*.db-shm
+data/

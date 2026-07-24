@@ -1,0 +1,195 @@
+# =============================================================================
+# pbi-watchdog — configuração
+#
+# Gere com:  pbi-watchdog init
+# Valide com: pbi-watchdog doctor --deep
+#
+# Segredos NUNCA ficam neste arquivo. Use ${VAR} (obrigatória) ou ${VAR:-default}.
+# =============================================================================
+version: 1
+
+# Fuso usado para buckets de baseline e freeze windows. "a média das 14h" é um
+# conceito de negócio — precisa ser o horário de quem usa o relatório, não UTC.
+timezone: America/Sao_Paulo
+
+# -----------------------------------------------------------------------------
+# AUTENTICAÇÃO
+# -----------------------------------------------------------------------------
+auth:
+  kind: service_principal
+  tenant_id: "00000000-0000-0000-0000-000000000000"
+  client_id: "${PBI_CLIENT_ID}"
+  client_secret: "${PBI_CLIENT_SECRET}"
+  # Alternativa a client_secret (recomendado em produção):
+  # certificate_path: /run/secrets/watchdog.pem
+  # certificate_thumbprint: "ABCD..."
+
+# Rodando dentro de um notebook Fabric, troque o bloco acima por:
+#   auth:
+#     kind: notebook
+
+# -----------------------------------------------------------------------------
+# FONTE DE MÉTRICAS — o Fabric Capacity Metrics App
+#
+# Ache os GUIDs com: pbi-watchdog discover --metrics
+# -----------------------------------------------------------------------------
+metrics_source:
+  kind: metrics_app_rest        # portátil (executeQueries). Dentro do Fabric: metrics_app_sempy
+  workspace_id: "00000000-0000-0000-0000-000000000000"
+  dataset_id: "00000000-0000-0000-0000-000000000000"
+  profile: auto                 # detecta o layout do modelo no primeiro ciclo
+  timeout_seconds: 120
+  # Se o seu Metrics App foi customizado e nenhum perfil bate, escreva o DAX aqui.
+  # Precisa devolver: item_id, item_name, item_kind, workspace_id, workspace_name,
+  # cu_seconds_today. Use {capacity_id} como placeholder.
+  # dax_override: |
+  #   EVALUATE ...
+
+# -----------------------------------------------------------------------------
+# PERSISTÊNCIA
+#
+# Guarda snapshots, intervalos, eventos e o estado por item. Perder isto = perder
+# a baseline: o watchdog volta a só observar até reacumular histórico.
+# APONTE PARA VOLUME PERSISTENTE (Azure Files, PVC, disco montado).
+# -----------------------------------------------------------------------------
+storage:
+  kind: sqlite
+  path: ./data/watchdog.db
+  # Dentro de um notebook Fabric com Lakehouse anexado:
+  # kind: delta
+  # table_prefix: watchdog_
+
+# -----------------------------------------------------------------------------
+# POLÍTICA PADRÃO
+#
+# Vale para todas as capacidades. Cada capacidade pode sobrescrever qualquer
+# bloco em `overrides` (merge por bloco: mexer em thresholds.alert preserva o resto).
+# -----------------------------------------------------------------------------
+defaults:
+  # observe = detecta, registra e alerta, nunca age.
+  # enforce = executa as ações dos tiers throttle/kill.
+  # COMECE EM OBSERVE. 2 a 4 semanas. Sem exceção.
+  mode: observe
+
+  # Precisa bater com a frequência real do agendamento. É usado para normalizar
+  # o consumo: se o agendador atrasar e o intervalo vier com 40 min, o watchdog
+  # reescala para não confundir atraso com pico.
+  interval_minutes: 15
+
+  baseline:
+    lookback_days: 7
+    # hour_of_day  = média daquela hora, qualquer dia (7 dias -> 7 amostras)
+    # hour_of_week = separa segunda-14h de domingo-14h. Melhor se sua carga tem
+    #                forma semanal forte, mas precisa de mais semanas para encher.
+    bucket: hour_of_day
+    min_days: 4          # abaixo disto o item só é observado, nunca acionado
+    method: median       # median é mais robusto a incidentes passados que mean
+    trim_top_percent: 10 # descarta o topo 10% antes de agregar
+
+  thresholds:
+    alert: 1.2      # consumo / baseline
+    throttle: 1.5
+    kill: 1.8
+
+  # -------------------------------------------------------------------------
+  # TRAVAS DE SEGURANÇA
+  # É o que separa um watchdog de um gerador de incidentes. Leia com atenção.
+  # -------------------------------------------------------------------------
+  guards:
+    # Piso absoluto. Item ocioso que sai de 1 para 3 CU·s é "3x" e irrelevante.
+    min_cu_seconds: 300
+
+    # Ciclos consecutivos acima do tier antes de agir. Com interval_minutes=15,
+    # 2 significa "sustentado por 30 minutos". Corta quase todo falso positivo.
+    consecutive_breaches: 2
+
+    # Depois de agir num item, ignora-o por N minutos. Sem isto, um refresh que
+    # retenta em loop vira uma metralhadora de cancelamentos.
+    cooldown_minutes: 60
+
+    # Circuit breaker. Se um ciclo quiser agir em mais itens que isto, não age em
+    # NENHUM e só alerta: muitos itens anômalos ao mesmo tempo é sintoma sistêmico
+    # (capacidade saturada, incidente no serviço), não culpa dos itens.
+    max_actions_per_run: 5
+
+    # Descarta intervalos cuja duração destoe de interval_minutes por mais que este
+    # fator. Um gap de 12h (watchdog parado, agendador travado) não é comparável a
+    # uma janela de 15 min: reescalar assume consumo uniforme, o que é falso justamente
+    # quando houve pico. Esses intervalos ficam no histórico bruto, mas não são
+    # avaliados nem entram na baseline.
+    max_interval_stretch: 3.0
+
+    # Só mata se a capacidade estiver acima de X% de utilização. Um item a 3x a
+    # baseline dele numa capacidade a 20% não está machucando ninguém.
+    # Requer `sku` declarado na capacidade. Deixe null para desativar.
+    min_capacity_utilization_percent: 60
+
+  # Ações por tier. Ordem importa; falha de uma não impede as outras.
+  actions:
+    alert:    [notify]
+    throttle: [notify, cancel_refresh, cancel_fabric_jobs]
+    kill:     [notify, cancel_refresh, cancel_fabric_jobs, kill_xmla_sessions]
+
+  # Itens que ALERTAM mas NUNCA sofrem ação. Regulatório, executivo, missão crítica.
+  protect:
+    item_ids: []
+    workspace_ids: []
+    item_kinds: []
+    name_patterns:
+      - "(?i)regulat"
+      - "(?i)\\bantt\\b"
+      - "(?i)executiv"
+
+  # Janelas em que o enforcement é desligado (alerta continua).
+  freeze_windows:
+    - name: fechamento-mensal
+      days_of_month: [1, 2, 3, 28, 29, 30, 31]
+      start_hour: 0
+      end_hour: 24
+    - name: carga-noturna
+      days: [0, 1, 2, 3, 4]   # 0=segunda .. 6=domingo
+      start_hour: 1
+      end_hour: 6
+
+  notify:
+    - kind: teams
+      url: "${TEAMS_WEBHOOK_URL}"
+      min_tier: alert
+    # - kind: webhook          # ServiceNow, PagerDuty, etc.
+    #   url: "${INCIDENT_WEBHOOK}"
+    #   min_tier: throttle
+
+# -----------------------------------------------------------------------------
+# CAPACIDADES MONITORADAS
+#
+# Ache os GUIDs com: pbi-watchdog discover --capacities
+# -----------------------------------------------------------------------------
+capacities:
+  - key: F128_PROD
+    id: "00000000-0000-0000-0000-000000000000"
+    sku: F128
+    description: "Produção — relatórios corporativos"
+    # Produção fica em observe por mais tempo que o resto.
+    overrides:
+      mode: observe
+      guards:
+        consecutive_breaches: 3
+        max_actions_per_run: 3
+
+  - key: F64_SANDBOX
+    id: "00000000-0000-0000-0000-000000000000"
+    sku: F64
+    description: "Sandbox de analistas — onde o enforcement estreia"
+    overrides:
+      mode: observe            # mude para enforce só depois do calibrate
+      thresholds:
+        alert: 1.15
+      guards:
+        cooldown_minutes: 30
+      freeze_windows: []       # sandbox não tem fechamento contábil
+
+  - key: F16_DEV
+    id: "00000000-0000-0000-0000-000000000000"
+    sku: F16
+    enabled: false
+    description: "Desenvolvimento — desligado por ora"

@@ -1,0 +1,65 @@
+# Publicação no PyPI via Trusted Publishing (OIDC) — sem API token guardado no repositório.
+#
+# Configuração, uma única vez, em https://pypi.org/manage/account/publishing/ :
+#   PyPI Project Name: pbi-watchdog
+#   Owner: devrenanferrari      Repository: Watchdog-powerbi
+#   Workflow: release.yml       Environment: pypi
+#
+# Depois disso, publicar é criar uma tag:  git tag v0.1.0 && git push origin v0.1.0
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Conferir que a tag bate com a versão do pacote
+        # Tag e __version__ divergentes produzem um release que ninguém consegue rastrear,
+        # e no PyPI a versão é imutável: não dá para corrigir depois.
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          python -m pip install --upgrade pip
+          TAG="${GITHUB_REF#refs/tags/v}"
+          PKG=$(python -c "import re,pathlib; print(re.search(r'version = \"([^\"]+)\"', pathlib.Path('pyproject.toml').read_text()).group(1))")
+          echo "tag=$TAG pacote=$PKG"
+          test "$TAG" = "$PKG" || { echo "::error::tag v$TAG != version $PKG no pyproject.toml"; exit 1; }
+
+      - name: Testes antes de publicar
+        run: |
+          python -m pip install -e ".[dev]"
+          python -m ruff check src tests
+          python -m pytest -q
+
+      - name: Construir
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+          python -m twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi          # proteja este environment com required reviewers
+    permissions:
+      id-token: write          # exigido pelo Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
