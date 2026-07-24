@@ -18,7 +18,7 @@ from .config import (
 from .models import Assessment, Event, Interval, ItemSnapshot, RunSummary, Tier
 from .runner import Watchdog
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     "Assessment",

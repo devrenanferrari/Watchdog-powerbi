@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pbi-watchdog"
-version = "0.1.0"
+version = "0.1.1"
 description = "Watchdog de capacidade para Power BI / Microsoft Fabric — detecta consumo anômalo de CU por item e reage em degraus."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -42,8 +42,9 @@ Repository = "https://github.com/devrenanferrari/Watchdog-powerbi"
 Issues = "https://github.com/devrenanferrari/Watchdog-powerbi/issues"
 
 [project.optional-dependencies]
-# Rodar dentro de um notebook Fabric: fonte via sempy e a ação kill_xmla_sessions.
-# Instale dentro do runtime Fabric, que já traz o sempy — fora dele o pacote não resolve.
+# NÃO instale este extra dentro de um notebook Fabric: o runtime já traz o sempy, e
+# reinstalá-lo pode conflitar com a versão dele. Lá basta `pip install pbi-watchdog`.
+# O extra existe para ambientes fora do Fabric que queiram o sempy mesmo assim.
 fabric = ["semantic-link-sempy>=0.4"]
 # Managed Identity, para rodar em Azure Function / Container Apps / VM.
 azure = ["azure-identity>=1.15"]

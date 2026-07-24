@@ -136,10 +136,31 @@ class MetricsAppSempySource:
             import sempy.fabric as fabric  # type: ignore
         except ImportError as e:  # pragma: no cover
             raise RuntimeError(
-                "metrics_source.kind='metrics_app_sempy' exige o extra: "
-                "`pip install pbi-watchdog[fabric]` dentro do runtime Fabric."
+                "metrics_source.kind='metrics_app_sempy' exige o sempy, que existe no runtime "
+                "Fabric. Fora dele use kind='metrics_app_rest'."
             ) from e
         return fabric
+
+    def _workspace_not_found(self, err: Exception) -> RuntimeError:
+        """O nome do workspace do Metrics App varia por versão e idioma; um 'not found' seco
+        deixa o usuário sem saída. Devolve a lista de candidatos reais da tenant."""
+        detail = ""
+        try:
+            from ..discover import find_metrics_app_sempy
+            from ..discover import render as render_candidates
+
+            candidates = find_metrics_app_sempy()
+            if not candidates:
+                candidates = find_metrics_app_sempy(include_all=True)
+            detail = "\n\n" + render_candidates(candidates, kind="metrics_app_sempy")
+        except Exception as e:
+            detail = f"\n(busca automática por candidatos falhou: {e})"
+
+        return RuntimeError(
+            f"Não encontrei o Capacity Metrics App em workspace_name="
+            f"'{self.cfg.workspace_name}' / dataset_name='{self.cfg.dataset_name}'.\n"
+            f"Erro original: {err}{detail}"
+        )
 
     def resolve_profile(self) -> prof.MetricsProfile:
         if self._profile is not None:
@@ -148,10 +169,17 @@ class MetricsAppSempySource:
             self._profile = prof.PROFILES[self.cfg.profile]
             return self._profile
         fabric = self._fabric()
-        tables = list(
-            fabric.list_tables(dataset=self.cfg.dataset_name, workspace=self.cfg.workspace_name)["Name"]
-        )
-        cols_df = fabric.list_columns(dataset=self.cfg.dataset_name, workspace=self.cfg.workspace_name)
+        try:
+            tables_df = fabric.list_tables(
+                dataset=self.cfg.dataset_name, workspace=self.cfg.workspace_name
+            )
+            cols_df = fabric.list_columns(
+                dataset=self.cfg.dataset_name, workspace=self.cfg.workspace_name
+            )
+        except Exception as e:
+            raise self._workspace_not_found(e) from e
+
+        tables = list(tables_df["Name"])
         columns = [f"{t}[{c}]" for t, c in zip(cols_df["Table Name"], cols_df["Column Name"])]
         picked = prof.pick_profile(tables, columns)
         if picked is None:
@@ -165,11 +193,16 @@ class MetricsAppSempySource:
     def snapshot(self, capacity: CapacityConfig, *, now: dt.datetime) -> List[ItemSnapshot]:
         fabric = self._fabric()
         profile = self.resolve_profile()
-        df = fabric.evaluate_dax(
-            dataset=self.cfg.dataset_name,
-            workspace=self.cfg.workspace_name,
-            dax_string=profile.dax.format(capacity_id=capacity.id),
-        )
+        try:
+            df = fabric.evaluate_dax(
+                dataset=self.cfg.dataset_name,
+                workspace=self.cfg.workspace_name,
+                dax_string=profile.dax.format(capacity_id=capacity.id),
+            )
+        except Exception as e:
+            if "not found" in str(e).lower():
+                raise self._workspace_not_found(e) from e
+            raise
         out: List[ItemSnapshot] = []
         for _, raw in df.iterrows():
             r = prof.normalize_row(dict(raw), profile)

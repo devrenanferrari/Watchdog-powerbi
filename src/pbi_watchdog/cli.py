@@ -95,22 +95,18 @@ def cmd_discover(args) -> int:
 
     if args.metrics or not (args.capacities or args.metrics):
         print("== Candidatos a Capacity Metrics App ==")
+        from .discover import find_metrics_app_rest
+        from .discover import render as render_candidates
+
         try:
-            groups = client.get(f"{PBI_BASE}/groups", params={"$top": 200})
-            found = False
-            for g in groups.get("value", []):
-                name = g.get("name", "")
-                if "metric" not in name.lower() and "capacity" not in name.lower():
-                    continue
-                datasets = client.get(f"{PBI_BASE}/groups/{g['id']}/datasets")
-                for d in datasets.get("value", []):
-                    found = True
-                    print(f"  workspace: {name}")
-                    print(f"    workspace_id: {g['id']}")
-                    print(f"    dataset: {d.get('name')}")
-                    print(f"    dataset_id:   {d.get('id')}")
-            if not found:
-                print("  (nada encontrado — adicione o SPN como Viewer no workspace do Metrics App)")
+            candidates = find_metrics_app_rest(client, include_all=args.all)
+            if not candidates and not args.all:
+                # O workspace pode ter sido renomeado para algo sem "metric"/"capacity".
+                print("  (nenhum nome óbvio; repetindo sem filtro)\n")
+                candidates = find_metrics_app_rest(client, include_all=True)
+            print(render_candidates(candidates))
+            if not candidates:
+                rc = 1
         except ApiError as e:
             print(f"  ❌ HTTP {e.status} ao listar workspaces.")
             rc = 1
@@ -260,6 +256,10 @@ def build_parser() -> argparse.ArgumentParser:
     s = add("discover", help="lista capacidades e o dataset do Metrics App")
     s.add_argument("--capacities", action="store_true")
     s.add_argument("--metrics", action="store_true")
+    s.add_argument(
+        "--all", action="store_true",
+        help="não filtra por nome — use se o workspace do Metrics App foi renomeado",
+    )
     s.set_defaults(func=cmd_discover)
 
     s = add("inspect-model", help="tabelas/colunas do Metrics App e perfis compatíveis")
