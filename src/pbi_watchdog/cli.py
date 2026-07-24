@@ -115,30 +115,29 @@ def cmd_discover(args) -> int:
 
 def cmd_inspect_model(args) -> int:
     config = _load(args)
+    from . import clock
     from .auth import build_token_provider
     from .sources import MetricsAppRestSource
-    from .sources.profiles import join_tables_and_columns, table_names
 
     source = MetricsAppRestSource(
         config.metrics_source, RestClient(build_token_provider(config.auth))
     )
-    raw_tables, raw_columns = source._introspect()
-    tables = table_names(raw_tables)
-    columns = join_tables_and_columns(raw_tables, raw_columns)
-    print(f"== Tabelas ({len(tables)}) ==")
-    for t in sorted(tables):
-        print(f"  {t}")
+    capacities = config.enabled_capacities
+    if not capacities:
+        print("Nenhuma capacidade habilitada para testar.")
+        return 1
+    cap = capacities[0]
+    print(f"== Teste de perfil DAX em {cap.key} ==")
+    try:
+        rows = source.snapshot(cap, now=clock.now_in(config.timezone))
+    except Exception as e:
+        print(f"  ❌ nenhum perfil executou: {e}")
+        return 1
+    profile = source.resolve_profile(cap.id)
+    print(f"  ✅ {profile.name}: consulta executou e devolveu {len(rows)} item(ns)")
     if args.verbose:
-        print(f"\n== Colunas ({len(columns)}) ==")
-        for c in sorted(columns):
-            print(f"  {c}")
-    from .sources.profiles import PROBE_ORDER, PROFILES, missing_requirements
-
-    print("\n== Compatibilidade de perfis ==")
-    for name in PROBE_ORDER:
-        missing = missing_requirements(PROFILES[name], tables, columns)
-        detalhe = f" — falta: {', '.join(missing)}" if missing else ""
-        print(f"  {'❌' if missing else '✅'} {name}{detalhe}")
+        for row in sorted(rows, key=lambda r: r.cu_seconds_today, reverse=True)[:10]:
+            print(f"     {row.item_name}: {row.cu_seconds_today:,.0f} CU·s")
     return 0
 
 

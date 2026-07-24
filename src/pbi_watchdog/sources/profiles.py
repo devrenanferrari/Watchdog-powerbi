@@ -1,9 +1,8 @@
 """Perfis de DAX para o Fabric Capacity Metrics App.
 
 O modelo do app muda de nome entre versões, e é a causa número um de "funcionou na minha
-tenant e quebrou na sua". Em vez de embutir um DAX fixo, declaramos perfis com as tabelas
-e colunas que cada um exige e detectamos qual bate, consultando o próprio modelo via
-`INFO.TABLES()` / `INFO.COLUMNS()`.
+tenant e quebrou na sua". Em vez de embutir um DAX fixo, declaramos perfis conhecidos. A
+fonte REST testa as consultas diretamente; a fonte sempy pode consultar os metadados.
 
 Se nenhum perfil bater, `metrics_source.dax_override` na config é a saída — a query só
 precisa devolver as colunas de `REQUIRED_COLUMNS`, nesta ordem de nomes.
@@ -57,6 +56,7 @@ FABRIC_METRICS_V1 = MetricsProfile(
         "Items[WorkspaceId]",
         "Capacities[capacityId]",
         "MetricsByItemandOperationandDay[Date]",
+        "MetricsByItemandOperationandDay[sum_CU]",
     ],
     dax="""
 EVALUATE
@@ -136,42 +136,6 @@ PROFILES: Dict[str, MetricsProfile] = {
 #: Ordem de tentativa no modo "auto".
 PROBE_ORDER = ["fabric_metrics_v1", "fabric_metrics_v2", "fabric_metrics_timepoints"]
 
-#: Introspecção do modelo via funções DAX INFO.*. Duas queries em vez de um join:
-#: SELECTCOLUMNS quebra a lineage que NATURALLEFTOUTERJOIN exige, então o join
-#: acontece em Python (`join_tables_and_columns`).
-DAX_LIST_TABLES = 'EVALUATE SELECTCOLUMNS(INFO.TABLES(), "tid", [ID], "name", [Name])'
-DAX_LIST_COLUMNS = 'EVALUATE SELECTCOLUMNS(INFO.COLUMNS(), "tid", [TableID], "col", [ExplicitName])'
-
-
-def _cell(row: dict, *names: str):
-    """O executeQueries devolve as chaves com colchetes; o sempy, sem. Aceita as duas formas."""
-    for n in names:
-        for candidate in (f"[{n}]", n):
-            if candidate in row:
-                return row[candidate]
-    return None
-
-
-def join_tables_and_columns(table_rows: List[dict], column_rows: List[dict]) -> List[str]:
-    """Monta a lista "Tabela[Coluna]" a partir das duas queries de introspecção."""
-    names_by_id = {}
-    for r in table_rows:
-        tid, name = _cell(r, "tid"), _cell(r, "name")
-        if tid is not None and name:
-            names_by_id[str(tid)] = str(name)
-
-    out = []
-    for r in column_rows:
-        tid, col = _cell(r, "tid"), _cell(r, "col")
-        table = names_by_id.get(str(tid))
-        if table and col:
-            out.append(f"{table}[{col}]")
-    return out
-
-
-def table_names(table_rows: List[dict]) -> List[str]:
-    return [str(_cell(r, "name")) for r in table_rows if _cell(r, "name")]
-
 
 def normalize_row(row: dict, profile: MetricsProfile) -> dict:
     """Traduz uma linha do executeQueries para as chaves canônicas.
@@ -179,6 +143,7 @@ def normalize_row(row: dict, profile: MetricsProfile) -> dict:
     Aceita variações de aspas/colchetes que a API às vezes devolve.
     """
     out: dict = {}
+    canonical_by_name = {name.lower(): name for name in REQUIRED_COLUMNS}
     for raw_key, value in row.items():
         canonical = profile.column_map.get(raw_key)
         if canonical is None:
@@ -187,6 +152,8 @@ def normalize_row(row: dict, profile: MetricsProfile) -> dict:
                 if k.replace("[", "").replace("]", "").strip().lower() == stripped.lower():
                     canonical = v
                     break
+            if canonical is None:
+                canonical = canonical_by_name.get(stripped.lower())
         if canonical:
             out[canonical] = value
     return out

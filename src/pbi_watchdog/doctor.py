@@ -141,7 +141,10 @@ class Doctor:
         if not isinstance(source, MetricsAppRestSource):
             return Check("Perfil de DAX", SKIP, detail=f"kind={cfg.kind}")
         try:
-            profile = source.resolve_profile()
+            capacities = self.config.enabled_capacities
+            if not capacities:
+                return Check("Perfil de DAX", FAIL, detail="nenhuma capacidade habilitada")
+            profile = source.resolve_profile(capacities[0].id)
             return Check("Perfil de DAX", OK, detail=f"{profile.name} — {profile.description}")
         except RuntimeError as e:
             return Check(

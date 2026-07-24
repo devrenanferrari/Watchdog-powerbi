@@ -134,11 +134,11 @@ Cada camada é um protocolo. Trocar SQLite por outro backend é implementar 9 m�
 
 O modelo do Capacity Metrics App muda de nome entre versões — é a causa número um de
 "funcionou na minha tenant e quebrou na sua". Em vez de embutir um DAX fixo, a lib declara
-perfis com as tabelas/colunas que cada um exige e detecta qual bate, consultando o modelo
-via `INFO.TABLES()` / `INFO.COLUMNS()`.
+perfis conhecidos e, no modo REST, testa cada consulta diretamente na primeira capacidade.
+Isso evita `INFO.TABLES()` / `INFO.COLUMNS()`, que não são aceitos por `executeQueries`.
 
 ```bash
-pbi-watchdog inspect-model -v     # mostra o modelo e quais perfis são compatíveis
+pbi-watchdog inspect-model -v     # testa a leitura e mostra o perfil que funcionou
 ```
 
 Se nenhum bater, `metrics_source.dax_override` aceita a sua query. Ela só precisa devolver

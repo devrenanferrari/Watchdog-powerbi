@@ -8,7 +8,7 @@ from typing import List, Optional, Protocol
 
 from ..config import CapacityConfig, MetricsSourceConfig
 from ..models import ItemSnapshot
-from ..rest import RestClient
+from ..rest import ApiError, RestClient
 from . import profiles as prof
 
 log = logging.getLogger(__name__)
@@ -26,29 +26,16 @@ class MetricsAppRestSource:
         self.cfg = cfg
         self.client = client
         self._profile: Optional[prof.MetricsProfile] = None
+        self._prefetched_rows: dict = {}
         if cfg.profile not in ("auto",) and cfg.profile in prof.PROFILES:
             self._profile = prof.PROFILES[cfg.profile]
 
-    # ------------------------------------------------------------ introspecção
+    def resolve_profile(self, capacity_id: Optional[str] = None) -> prof.MetricsProfile:
+        """Resolve o perfil sem usar INFO.*, que não é aceito por executeQueries.
 
-    def _introspect(self) -> tuple:
-        tables = self.client.execute_dax(
-            self.cfg.workspace_id, self.cfg.dataset_id, prof.DAX_LIST_TABLES
-        )
-        columns = self.client.execute_dax(
-            self.cfg.workspace_id, self.cfg.dataset_id, prof.DAX_LIST_COLUMNS
-        )
-        return tables, columns
-
-    def list_tables(self) -> List[str]:
-        tables, _ = self._introspect()
-        return prof.table_names(tables)
-
-    def list_columns(self) -> List[str]:
-        tables, columns = self._introspect()
-        return prof.join_tables_and_columns(tables, columns)
-
-    def resolve_profile(self) -> prof.MetricsProfile:
+        No modo ``auto``, cada DAX conhecido é testado contra uma capacidade real.
+        O primeiro resultado é guardado para virar o snapshot, evitando consulta dupla.
+        """
         if self._profile is not None:
             return self._profile
         if self.cfg.dax_override:
@@ -61,39 +48,55 @@ class MetricsAppRestSource:
                 column_map=prof.FABRIC_METRICS_V1.column_map,
             )
             return self._profile
-
-        raw_tables, raw_columns = self._introspect()
-        tables = prof.table_names(raw_tables)
-        columns = prof.join_tables_and_columns(raw_tables, raw_columns)
-        picked = prof.pick_profile(tables, columns)
-        if picked is None:
-            detail = "\n".join(
-                f"  - {name}: falta "
-                + ", ".join(prof.missing_requirements(prof.PROFILES[name], tables, columns))
-                for name in prof.PROBE_ORDER
-            )
+        if not capacity_id:
             raise RuntimeError(
-                "Nenhum perfil de DAX bate com o seu Capacity Metrics App.\n"
-                f"Tabelas encontradas: {sorted(tables)[:30]}\n"
-                f"{detail}\n"
-                "Ajuste `metrics_source.dax_override` na config com uma query que devolva "
-                f"{prof.REQUIRED_COLUMNS}."
+                "A detecção automática do perfil REST precisa de um capacity_id para testar "
+                "as consultas. Informe uma capacidade ou defina metrics_source.profile."
             )
-        log.info("Perfil de métricas detectado: %s", picked.name)
-        self._profile = picked
-        return picked
+
+        failures = []
+        for name in prof.PROBE_ORDER:
+            candidate = prof.PROFILES[name]
+            dax = candidate.dax.format(capacity_id=capacity_id)
+            try:
+                rows = self.client.execute_dax(
+                    self.cfg.workspace_id,
+                    self.cfg.dataset_id,
+                    dax,
+                    timeout=self.cfg.timeout_seconds,
+                )
+            except ApiError as e:
+                if e.status != 400:
+                    raise
+                failures.append(f"{name}: HTTP 400 - {e.body[:180]}")
+                continue
+            self._profile = candidate
+            self._prefetched_rows[capacity_id] = rows
+            log.info("Perfil de métricas detectado por consulta: %s", candidate.name)
+            return candidate
+
+        detail = "\n".join(f"  - {failure}" for failure in failures)
+        raise RuntimeError(
+            "Nenhum perfil DAX conhecido executou no Capacity Metrics App.\n"
+            f"{detail}\n"
+            "Defina metrics_source.dax_override com uma consulta que devolva "
+            f"{prof.REQUIRED_COLUMNS}."
+        )
 
     # ------------------------------------------------------------ snapshot
 
     def snapshot(self, capacity: CapacityConfig, *, now: dt.datetime) -> List[ItemSnapshot]:
-        profile = self.resolve_profile()
-        dax = profile.dax.format(capacity_id=capacity.id)
-        rows = self.client.execute_dax(
-            self.cfg.workspace_id,
-            self.cfg.dataset_id,
-            dax,
-            timeout=self.cfg.timeout_seconds,
-        )
+        profile = self.resolve_profile(capacity.id)
+        if capacity.id in self._prefetched_rows:
+            rows = self._prefetched_rows.pop(capacity.id)
+        else:
+            dax = profile.dax.format(capacity_id=capacity.id)
+            rows = self.client.execute_dax(
+                self.cfg.workspace_id,
+                self.cfg.dataset_id,
+                dax,
+                timeout=self.cfg.timeout_seconds,
+            )
         out: List[ItemSnapshot] = []
         for raw in rows:
             r = prof.normalize_row(raw, profile)
@@ -164,6 +167,16 @@ class MetricsAppSempySource:
 
     def resolve_profile(self) -> prof.MetricsProfile:
         if self._profile is not None:
+            return self._profile
+        if self.cfg.dax_override:
+            self._profile = prof.MetricsProfile(
+                name="custom",
+                description="dax_override da config",
+                requires_tables=[],
+                requires_columns=[],
+                dax=self.cfg.dax_override,
+                column_map=prof.FABRIC_METRICS_V1.column_map,
+            )
             return self._profile
         if self.cfg.profile in prof.PROFILES:
             self._profile = prof.PROFILES[self.cfg.profile]
